@@ -80,6 +80,22 @@ struct Suggestion {
     score: f64,
 }
 
+/// Returns true if a note should be suppressed from co-citation scoring:
+/// calendrical notes (YYYY-MM-DD, YYYY-WXX) and vault utility files (TODO, etc.).
+fn suppress_from_suggest(path: &Path) -> bool {
+    is_calendrical(path) || is_utility_note(path)
+}
+
+/// Vault utility files — meta-notes that aren't knowledge content.
+/// Matched case-insensitively against the stem.
+fn is_utility_note(path: &Path) -> bool {
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    matches!(stem.to_ascii_lowercase().as_str(), "todo" | "readme" | "moc" | "index")
+}
+
 /// Returns true for calendrical notes (YYYY-MM-DD daily, YYYY-WXX weekly).
 /// These are temporal hubs — linked from many notes written on the same day —
 /// and produce false-positive co-citation signal.
@@ -148,7 +164,7 @@ fn suggest_links(
         .into_iter()
         .flatten()
         .chain(incoming.get(seed).into_iter().flatten())
-        .filter(|p| !is_calendrical(p))
+        .filter(|p| !suppress_from_suggest(p))
         .collect();
 
     // Already-connected: seed + its neighbors (skip as candidates).
@@ -157,7 +173,7 @@ fn suggest_links(
 
     let mut results: Vec<(PathBuf, Vec<PathBuf>, f64)> = outgoing
         .keys()
-        .filter(|note| !connected.contains(note) && !is_calendrical(note))
+        .filter(|note| !connected.contains(note) && !suppress_from_suggest(note))
         .filter_map(|note| {
             let note_neighbors: HashSet<&PathBuf> = outgoing
                 .get(note)
