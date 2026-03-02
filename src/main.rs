@@ -13,7 +13,7 @@ use unicase::UniCase;
 
 #[derive(Parser)]
 #[command(name = "hypha", version, about = "Obsidian vault link graph traverser")]
-#[command(group(ArgGroup::new("mode").required(true).args(["from", "path_flag"])))]
+#[command(group(ArgGroup::new("mode").required(true).args(["from", "path_flag", "suggest"])))]
 struct Cli {
     /// Vault root directory
     path: PathBuf,
@@ -21,8 +21,14 @@ struct Cli {
     from: Option<String>,
     #[arg(long = "path", group = "mode", num_args = 2, value_names = ["FROM", "TO"])]
     path_flag: Option<Vec<String>>,
+    #[arg(long, group = "mode", value_name = "NOTE",
+          help = "suggest notes that should link to/from NOTE (co-citation ranking)")]
+    suggest: Option<String>,
     #[arg(long, default_value_t = 1)]
     depth: usize,
+    #[arg(long, default_value_t = 15,
+          help = "max suggestions to show (default 15)")]
+    top: usize,
     #[arg(long)]
     exclude: Vec<String>,
     #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
@@ -55,6 +61,85 @@ struct PathReport {
     to: String,
     hops: usize,
     path: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct SuggestReport {
+    note: String,
+    suggestions: Vec<Suggestion>,
+}
+
+#[derive(Serialize)]
+struct Suggestion {
+    note: String,
+    common_neighbors: usize,
+}
+
+/// Co-citation ranking: notes not yet connected to `seed` that share the most
+/// common neighbors (outgoing ∪ incoming). Returns (path, overlap) sorted
+/// descending, filtered to overlap >= 2, capped at `top`.
+fn suggest_links(
+    seed: &PathBuf,
+    outgoing: &HashMap<PathBuf, Vec<PathBuf>>,
+    incoming: &HashMap<PathBuf, Vec<PathBuf>>,
+    top: usize,
+) -> Vec<(PathBuf, usize)> {
+    // Seed's full neighbor set (both directions).
+    let seed_neighbors: HashSet<&PathBuf> = outgoing
+        .get(seed)
+        .into_iter()
+        .flatten()
+        .chain(incoming.get(seed).into_iter().flatten())
+        .collect();
+
+    // Already-connected set: seed + its neighbors (skip these as suggestions).
+    let mut connected: HashSet<&PathBuf> = seed_neighbors.clone();
+    connected.insert(seed);
+
+    let mut scores: Vec<(PathBuf, usize)> = outgoing
+        .keys()
+        .filter(|note| !connected.contains(note))
+        .map(|note| {
+            let note_neighbors: HashSet<&PathBuf> = outgoing
+                .get(note)
+                .into_iter()
+                .flatten()
+                .chain(incoming.get(note).into_iter().flatten())
+                .collect();
+            let overlap = seed_neighbors.intersection(&note_neighbors).count();
+            (note.clone(), overlap)
+        })
+        .filter(|(_, overlap)| *overlap >= 2)
+        .collect();
+
+    scores.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    scores.truncate(top);
+    scores
+}
+
+fn print_suggestions(seed: &PathBuf, suggestions: &[(PathBuf, usize)]) {
+    let use_color = io::stdout().is_terminal();
+    let seed_name = seed.file_stem().unwrap_or_default().to_string_lossy();
+    let heading = format!("=== Suggested links for: {seed_name} ===");
+    if use_color {
+        println!("\x1b[1;36m{heading}\x1b[0m");
+    } else {
+        println!("{heading}");
+    }
+    if suggestions.is_empty() {
+        println!("\n  No suggestions (no notes with 2+ common neighbors).");
+        return;
+    }
+    let mut current_overlap = usize::MAX;
+    for (path, overlap) in suggestions {
+        if *overlap != current_overlap {
+            current_overlap = *overlap;
+            let noun = if *overlap == 1 { "neighbor" } else { "neighbors" };
+            println!("\nCommon {noun}: {overlap}");
+        }
+        let name = path.file_stem().unwrap_or_default().to_string_lossy();
+        println!("  {name}");
+    }
 }
 
 fn main() -> ExitCode {
@@ -206,6 +291,43 @@ fn main() -> ExitCode {
                 return ExitCode::from(1);
             }
         }
+    }
+
+    if let Some(note_name) = &cli.suggest {
+        let seed = match resolve_note(note_name, &index) {
+            Ok(p) => p,
+            Err(candidates) => {
+                if candidates.is_empty() {
+                    eprintln!("Note not found: {note_name}");
+                } else {
+                    eprintln!("Ambiguous: {note_name:?} matches multiple notes:");
+                    for c in &candidates {
+                        eprintln!("  {c}");
+                    }
+                }
+                return ExitCode::from(1);
+            }
+        };
+
+        let suggestions = suggest_links(&seed, &outgoing, &incoming, cli.top);
+
+        match format {
+            OutputFormat::Human => print_suggestions(&seed, &suggestions),
+            OutputFormat::Json => {
+                let report = SuggestReport {
+                    note: seed.file_stem().unwrap_or_default().to_string_lossy().into_owned(),
+                    suggestions: suggestions
+                        .iter()
+                        .map(|(p, overlap)| Suggestion {
+                            note: p.file_stem().unwrap_or_default().to_string_lossy().into_owned(),
+                            common_neighbors: *overlap,
+                        })
+                        .collect(),
+                };
+                println!("{}", serde_json::to_string_pretty(&report).unwrap());
+            }
+        }
+        return ExitCode::SUCCESS;
     }
 
     ExitCode::SUCCESS
