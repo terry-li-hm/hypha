@@ -5,10 +5,7 @@ use std::fs;
 use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use trama::{
-    build_file_index, collect_markdown_files, extract_wikilinks,
-    validate_vault_path,
-};
+use trama::{build_file_index, collect_markdown_files, extract_wikilinks, validate_vault_path};
 use unicase::UniCase;
 
 #[derive(Parser)]
@@ -21,13 +18,20 @@ struct Cli {
     from: Option<String>,
     #[arg(long = "path", group = "mode", num_args = 2, value_names = ["FROM", "TO"])]
     path_flag: Option<Vec<String>>,
-    #[arg(long, group = "mode", value_name = "NOTE",
-          help = "suggest notes that should link to/from NOTE (co-citation ranking)")]
+    #[arg(
+        long,
+        group = "mode",
+        value_name = "NOTE",
+        help = "suggest notes that should link to/from NOTE (co-citation ranking)"
+    )]
     suggest: Option<String>,
     #[arg(long, default_value_t = 1)]
     depth: usize,
-    #[arg(long, default_value_t = 15,
-          help = "max suggestions to show (default 15)")]
+    #[arg(
+        long,
+        default_value_t = 15,
+        help = "max suggestions to show (default 15)"
+    )]
     top: usize,
     #[arg(long)]
     exclude: Vec<String>,
@@ -170,7 +174,11 @@ fn print_suggestions(seed: &Path, suggestions: &[(PathBuf, usize)]) {
     for (path, overlap) in suggestions {
         if *overlap != current_overlap {
             current_overlap = *overlap;
-            let noun = if *overlap == 1 { "neighbor" } else { "neighbors" };
+            let noun = if *overlap == 1 {
+                "neighbor"
+            } else {
+                "neighbors"
+            };
             println!("\nCommon {noun}: {overlap}");
         }
         let name = path.file_stem().unwrap_or_default().to_string_lossy();
@@ -351,11 +359,19 @@ fn main() -> ExitCode {
             OutputFormat::Human => print_suggestions(&seed, &suggestions),
             OutputFormat::Json => {
                 let report = SuggestReport {
-                    note: seed.file_stem().unwrap_or_default().to_string_lossy().into_owned(),
+                    note: seed
+                        .file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned(),
                     suggestions: suggestions
                         .iter()
                         .map(|(p, overlap)| Suggestion {
-                            note: p.file_stem().unwrap_or_default().to_string_lossy().into_owned(),
+                            note: p
+                                .file_stem()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .into_owned(),
                             common_neighbors: *overlap,
                         })
                         .collect(),

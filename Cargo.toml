@@ -2,6 +2,18 @@
 name = "hypha"
 version = "0.1.0"
 edition = "2021"
+description = "Obsidian vault link graph traverser — neighborhood BFS, shortest path, and co-citation link suggestions"
+license = "MIT"
+repository = "https://github.com/terry-li-hm/hypha"
+keywords = ["obsidian", "markdown", "wikilinks", "graph", "cli"]
+categories = ["command-line-utilities", "text-processing"]
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
 
 [dependencies]
 clap       = { version = "4", features = ["derive"] }
