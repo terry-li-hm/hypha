@@ -3,7 +3,7 @@ use serde::Serialize;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::{self, IsTerminal};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use trama::{
     build_file_index, collect_markdown_files, extract_wikilinks,
@@ -75,21 +75,57 @@ struct Suggestion {
     common_neighbors: usize,
 }
 
+/// Returns true for calendrical notes (YYYY-MM-DD daily, YYYY-WXX weekly).
+/// These are temporal hubs — linked from many notes written on the same day —
+/// and produce false-positive co-citation signal.
+fn is_calendrical(path: &Path) -> bool {
+    let stem = match path.file_stem().and_then(|s| s.to_str()) {
+        Some(s) => s.to_owned(),
+        None => return false,
+    };
+    let stem = stem.as_str();
+    let b = stem.as_bytes();
+    // YYYY-MM-DD
+    if b.len() == 10
+        && b[4] == b'-'
+        && b[7] == b'-'
+        && b[..4].iter().all(|c| c.is_ascii_digit())
+        && b[5..7].iter().all(|c| c.is_ascii_digit())
+        && b[8..].iter().all(|c| c.is_ascii_digit())
+    {
+        return true;
+    }
+    // YYYY-WXX (e.g. 2026-W09)
+    if (b.len() == 7 || b.len() == 8)
+        && b[4] == b'-'
+        && b[5] == b'W'
+        && b[..4].iter().all(|c| c.is_ascii_digit())
+        && b[6..].iter().all(|c| c.is_ascii_digit())
+    {
+        return true;
+    }
+    false
+}
+
 /// Co-citation ranking: notes not yet connected to `seed` that share the most
 /// common neighbors (outgoing ∪ incoming). Returns (path, overlap) sorted
 /// descending, filtered to overlap >= 2, capped at `top`.
+///
+/// Calendrical notes (YYYY-MM-DD, YYYY-WXX) are excluded from the neighbor
+/// set — they are temporal hubs, not semantic connections.
 fn suggest_links(
     seed: &PathBuf,
     outgoing: &HashMap<PathBuf, Vec<PathBuf>>,
     incoming: &HashMap<PathBuf, Vec<PathBuf>>,
     top: usize,
 ) -> Vec<(PathBuf, usize)> {
-    // Seed's full neighbor set (both directions).
+    // Seed's full neighbor set (both directions), calendrical notes stripped.
     let seed_neighbors: HashSet<&PathBuf> = outgoing
         .get(seed)
         .into_iter()
         .flatten()
         .chain(incoming.get(seed).into_iter().flatten())
+        .filter(|p| !is_calendrical(p))
         .collect();
 
     // Already-connected set: seed + its neighbors (skip these as suggestions).
@@ -98,7 +134,7 @@ fn suggest_links(
 
     let mut scores: Vec<(PathBuf, usize)> = outgoing
         .keys()
-        .filter(|note| !connected.contains(note))
+        .filter(|note| !connected.contains(note) && !is_calendrical(note))
         .map(|note| {
             let note_neighbors: HashSet<&PathBuf> = outgoing
                 .get(note)
@@ -117,7 +153,7 @@ fn suggest_links(
     scores
 }
 
-fn print_suggestions(seed: &PathBuf, suggestions: &[(PathBuf, usize)]) {
+fn print_suggestions(seed: &Path, suggestions: &[(PathBuf, usize)]) {
     let use_color = io::stdout().is_terminal();
     let seed_name = seed.file_stem().unwrap_or_default().to_string_lossy();
     let heading = format!("=== Suggested links for: {seed_name} ===");
@@ -393,15 +429,15 @@ fn resolve_note(
 }
 
 fn neighborhood(
-    seed: &PathBuf,
+    seed: &Path,
     outgoing: &HashMap<PathBuf, Vec<PathBuf>>,
     incoming: &HashMap<PathBuf, Vec<PathBuf>>,
     depth: usize,
 ) -> Vec<(Vec<PathBuf>, Vec<PathBuf>)> {
     let mut seen: HashSet<PathBuf> = HashSet::new();
-    seen.insert(seed.clone());
+    seen.insert(seed.to_path_buf());
 
-    let mut frontier: Vec<PathBuf> = vec![seed.clone()];
+    let mut frontier: Vec<PathBuf> = vec![seed.to_path_buf()];
     let mut levels = Vec::with_capacity(depth);
 
     for _ in 1..=depth {
@@ -450,7 +486,7 @@ fn neighborhood(
 }
 
 fn shortest_path(
-    from: &PathBuf,
+    from: &Path,
     to: &PathBuf,
     outgoing: &HashMap<PathBuf, Vec<PathBuf>>,
 ) -> Option<Vec<PathBuf>> {
@@ -458,8 +494,8 @@ fn shortest_path(
     let mut parent: HashMap<PathBuf, PathBuf> = HashMap::new();
     let mut visited: HashSet<PathBuf> = HashSet::new();
 
-    queue.push_back(from.clone());
-    visited.insert(from.clone());
+    queue.push_back(from.to_path_buf());
+    visited.insert(from.to_path_buf());
 
     while let Some(node) = queue.pop_front() {
         if &node == to {
@@ -484,7 +520,7 @@ fn shortest_path(
     None
 }
 
-fn print_neighborhood(seed: &PathBuf, depth: usize, levels: &[(Vec<PathBuf>, Vec<PathBuf>)]) {
+fn print_neighborhood(seed: &Path, depth: usize, levels: &[(Vec<PathBuf>, Vec<PathBuf>)]) {
     let use_color = io::stdout().is_terminal();
     let note = seed
         .file_stem()
@@ -508,7 +544,7 @@ fn print_neighborhood(seed: &PathBuf, depth: usize, levels: &[(Vec<PathBuf>, Vec
         let empty_out: Vec<PathBuf> = Vec::new();
         let empty_in: Vec<PathBuf> = Vec::new();
         let (out, inc) = levels
-            .get(0)
+            .first()
             .map(|(o, i)| (o, i))
             .unwrap_or((&empty_out, &empty_in));
         println!("Outgoing ({}):", out.len());
@@ -547,7 +583,7 @@ fn print_neighborhood(seed: &PathBuf, depth: usize, levels: &[(Vec<PathBuf>, Vec
 
 fn print_path(path: &[PathBuf]) {
     let use_color = io::stdout().is_terminal();
-    let names: Vec<String> = path.iter().map(display_note_name).collect();
+    let names: Vec<String> = path.iter().map(|p| display_note_name(p)).collect();
     let hops = path.len().saturating_sub(1);
     let heading_text = format!(
         "=== Path: {} → {} ({} hops) ===",
@@ -564,7 +600,7 @@ fn print_path(path: &[PathBuf]) {
     println!("  {}", names.join(" → "));
 }
 
-fn display_note_name(path: &PathBuf) -> String {
+fn display_note_name(path: &Path) -> String {
     path.file_stem()
         .unwrap_or_default()
         .to_string_lossy()
@@ -574,7 +610,7 @@ fn display_note_name(path: &PathBuf) -> String {
 fn join_note_names(paths: &[PathBuf]) -> String {
     paths
         .iter()
-        .map(display_note_name)
+        .map(|p| display_note_name(p))
         .collect::<Vec<_>>()
         .join("  ")
 }
