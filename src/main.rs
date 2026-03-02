@@ -76,7 +76,8 @@ struct SuggestReport {
 #[derive(Serialize)]
 struct Suggestion {
     note: String,
-    common_neighbors: usize,
+    shared_neighbors: Vec<String>,
+    score: f64,
 }
 
 /// Returns true for calendrical notes (YYYY-MM-DD daily, YYYY-WXX weekly).
@@ -111,9 +112,11 @@ fn is_calendrical(path: &Path) -> bool {
     false
 }
 
-/// Co-citation ranking: notes not yet connected to `seed` that share the most
-/// common neighbors (outgoing ∪ incoming). Returns (path, overlap) sorted
-/// descending, filtered to overlap >= 2, capped at `top`.
+/// Co-citation ranking with IDF weighting.
+///
+/// Hub notes (high incoming degree) contribute less signal as shared neighbors
+/// than niche notes. Returns (candidate, shared_neighbors, idf_score) sorted
+/// by score descending, filtered to score >= 0.5, capped at `top`.
 ///
 /// Calendrical notes (YYYY-MM-DD, YYYY-WXX) are excluded from the neighbor
 /// set — they are temporal hubs, not semantic connections.
@@ -122,8 +125,22 @@ fn suggest_links(
     outgoing: &HashMap<PathBuf, Vec<PathBuf>>,
     incoming: &HashMap<PathBuf, Vec<PathBuf>>,
     top: usize,
-) -> Vec<(PathBuf, usize)> {
-    // Seed's full neighbor set (both directions), calendrical notes stripped.
+) -> Vec<(PathBuf, Vec<PathBuf>, f64)> {
+    // Compute incoming degree for IDF weighting.
+    let mut in_degree: HashMap<&PathBuf, usize> = HashMap::new();
+    for targets in outgoing.values() {
+        for t in targets {
+            *in_degree.entry(t).or_insert(0) += 1;
+        }
+    }
+    // IDF weight = 1 / (1 + ln(1 + degree)). Range (0, 1].
+    // degree 0 → 1.0,  degree 5 → ~0.36,  degree 20 → ~0.26.
+    let idf_weight = |p: &PathBuf| -> f64 {
+        let deg = *in_degree.get(p).unwrap_or(&0) as f64;
+        1.0 / (1.0 + deg.ln_1p())
+    };
+
+    // Seed's neighbor set (both directions), calendrical stripped.
     let seed_neighbors: HashSet<&PathBuf> = outgoing
         .get(seed)
         .into_iter()
@@ -132,32 +149,46 @@ fn suggest_links(
         .filter(|p| !is_calendrical(p))
         .collect();
 
-    // Already-connected set: seed + its neighbors (skip these as suggestions).
+    // Already-connected: seed + its neighbors (skip as candidates).
     let mut connected: HashSet<&PathBuf> = seed_neighbors.clone();
     connected.insert(seed);
 
-    let mut scores: Vec<(PathBuf, usize)> = outgoing
+    let mut results: Vec<(PathBuf, Vec<PathBuf>, f64)> = outgoing
         .keys()
         .filter(|note| !connected.contains(note) && !is_calendrical(note))
-        .map(|note| {
+        .filter_map(|note| {
             let note_neighbors: HashSet<&PathBuf> = outgoing
                 .get(note)
                 .into_iter()
                 .flatten()
                 .chain(incoming.get(note).into_iter().flatten())
                 .collect();
-            let overlap = seed_neighbors.intersection(&note_neighbors).count();
-            (note.clone(), overlap)
+            let mut shared: Vec<PathBuf> = seed_neighbors
+                .intersection(&note_neighbors)
+                .map(|p| (*p).clone())
+                .collect();
+            if shared.is_empty() {
+                return None;
+            }
+            let score: f64 = shared.iter().map(idf_weight).sum();
+            if score < 0.5 {
+                return None;
+            }
+            shared.sort();
+            Some((note.clone(), shared, score))
         })
-        .filter(|(_, overlap)| *overlap >= 2)
         .collect();
 
-    scores.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    scores.truncate(top);
-    scores
+    results.sort_by(|a, b| {
+        b.2.partial_cmp(&a.2)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    results.truncate(top);
+    results
 }
 
-fn print_suggestions(seed: &Path, suggestions: &[(PathBuf, usize)]) {
+fn print_suggestions(seed: &Path, suggestions: &[(PathBuf, Vec<PathBuf>, f64)]) {
     let use_color = io::stdout().is_terminal();
     let seed_name = seed.file_stem().unwrap_or_default().to_string_lossy();
     let heading = format!("=== Suggested links for: {seed_name} ===");
@@ -167,22 +198,27 @@ fn print_suggestions(seed: &Path, suggestions: &[(PathBuf, usize)]) {
         println!("{heading}");
     }
     if suggestions.is_empty() {
-        println!("\n  No suggestions (no notes with 2+ common neighbors).");
+        println!("\n  No suggestions.");
         return;
     }
-    let mut current_overlap = usize::MAX;
-    for (path, overlap) in suggestions {
-        if *overlap != current_overlap {
-            current_overlap = *overlap;
-            let noun = if *overlap == 1 {
-                "neighbor"
-            } else {
-                "neighbors"
-            };
-            println!("\nCommon {noun}: {overlap}");
-        }
+    for (path, shared, _score) in suggestions {
+        println!();
         let name = path.file_stem().unwrap_or_default().to_string_lossy();
-        println!("  {name}");
+        if use_color {
+            println!("  \x1b[1m{name}\x1b[0m");
+        } else {
+            println!("  {name}");
+        }
+        let via: Vec<String> = shared
+            .iter()
+            .map(|p| p.file_stem().unwrap_or_default().to_string_lossy().into_owned())
+            .collect();
+        let via_str = via.join(", ");
+        if use_color {
+            println!("    \x1b[2m→ {via_str}\x1b[0m");
+        } else {
+            println!("    → {via_str}");
+        }
     }
 }
 
@@ -366,13 +402,22 @@ fn main() -> ExitCode {
                         .into_owned(),
                     suggestions: suggestions
                         .iter()
-                        .map(|(p, overlap)| Suggestion {
+                        .map(|(p, shared, score)| Suggestion {
                             note: p
                                 .file_stem()
                                 .unwrap_or_default()
                                 .to_string_lossy()
                                 .into_owned(),
-                            common_neighbors: *overlap,
+                            shared_neighbors: shared
+                                .iter()
+                                .map(|n| {
+                                    n.file_stem()
+                                        .unwrap_or_default()
+                                        .to_string_lossy()
+                                        .into_owned()
+                                })
+                                .collect(),
+                            score: (score * 100.0).round() / 100.0,
                         })
                         .collect(),
                 };
