@@ -1,6 +1,6 @@
 [package]
 name = "hypha"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 description = "Obsidian vault link graph traverser — neighborhood BFS, shortest path, and co-citation link suggestions"
 license = "MIT"

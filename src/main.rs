@@ -112,11 +112,12 @@ fn is_calendrical(path: &Path) -> bool {
     false
 }
 
-/// Co-citation ranking with IDF weighting.
+/// Co-citation ranking with Resource Allocation (RA) weighting.
 ///
-/// Hub notes (high incoming degree) contribute less signal as shared neighbors
-/// than niche notes. Returns (candidate, shared_neighbors, idf_score) sorted
-/// by score descending, filtered to score >= 0.5, capped at `top`.
+/// Each shared neighbor k contributes 1/degree(k) to the score. RA penalises
+/// hub notes harder than Adamic-Adar (1/log) — empirically outperforms AA on
+/// sparse graphs. Returns (candidate, shared_neighbors, ra_score) sorted by
+/// score descending, filtered to score >= 0.1, capped at `top`.
 ///
 /// Calendrical notes (YYYY-MM-DD, YYYY-WXX) are excluded from the neighbor
 /// set — they are temporal hubs, not semantic connections.
@@ -126,18 +127,19 @@ fn suggest_links(
     incoming: &HashMap<PathBuf, Vec<PathBuf>>,
     top: usize,
 ) -> Vec<(PathBuf, Vec<PathBuf>, f64)> {
-    // Compute incoming degree for IDF weighting.
+    // Compute incoming degree for RA weighting.
     let mut in_degree: HashMap<&PathBuf, usize> = HashMap::new();
     for targets in outgoing.values() {
         for t in targets {
             *in_degree.entry(t).or_insert(0) += 1;
         }
     }
-    // IDF weight = 1 / (1 + ln(1 + degree)). Range (0, 1].
-    // degree 0 → 1.0,  degree 5 → ~0.36,  degree 20 → ~0.26.
-    let idf_weight = |p: &PathBuf| -> f64 {
-        let deg = *in_degree.get(p).unwrap_or(&0) as f64;
-        1.0 / (1.0 + deg.ln_1p())
+    // Resource Allocation weight = 1 / degree. Range (0, 1].
+    // degree 1 → 1.0,  degree 5 → 0.20,  degree 20 → 0.05.
+    // Unlinked notes (degree 0) contribute 0 — no signal.
+    let ra_weight = |p: &PathBuf| -> f64 {
+        let deg = *in_degree.get(p).unwrap_or(&0);
+        if deg == 0 { 0.0 } else { 1.0 / deg as f64 }
     };
 
     // Seed's neighbor set (both directions), calendrical stripped.
@@ -170,8 +172,8 @@ fn suggest_links(
             if shared.is_empty() {
                 return None;
             }
-            let score: f64 = shared.iter().map(idf_weight).sum();
-            if score < 0.5 {
+            let score: f64 = shared.iter().map(ra_weight).sum();
+            if score < 0.1 {
                 return None;
             }
             shared.sort();
